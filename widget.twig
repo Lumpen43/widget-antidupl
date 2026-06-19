@@ -1,0 +1,76 @@
+<div class="merger-settings">
+    <div class="merger-info">
+        <p>{{ lang.interface.auto_merge_status }}</p>
+    </div>
+
+    <hr>
+
+    <div class="merger-actions">
+        <button class="merge-scan-btn am-button am-button--success">{{ lang.interface.scan_button }}</button>
+        <div class="merge-status" style="display:none">{{ lang.interface.scanning }}</div>
+        <div class="merge-error" style="display:none;color:red"></div>
+    </div>
+
+    <div class="merge-results" style="display:none">
+        <h4>{{ lang.interface.found_groups }} <span class="groups-count"></span></h4>
+        <div class="groups-container"></div>
+    </div>
+</div>
+
+<style>
+.merger-settings {
+    padding: 15px 0;
+}
+.merger-settings hr {
+    margin: 20px 0;
+    border: none;
+    border-top: 1px solid #e0e0e0;
+}
+.merger-info p {
+    color: #666;
+    font-size: 13px;
+    line-height: 1.5;
+}
+.merger-actions {
+    margin: 15px 0;
+}
+.merge-status {
+    margin-top: 10px;
+    color: #888;
+    font-style: italic;
+}
+.merge-error {
+    margin-top: 10px;
+    font-weight: bold;
+}
+.merge-results h4 {
+    margin: 15px 0 10px;
+}
+.duplicate-group {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
+.duplicate-group h5 {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: #333;
+}
+.duplicate-item {
+    padding: 4px 8px;
+    margin: 3px 0;
+    font-size: 13px;
+    border-left: 3px solid #ccc;
+    background: #fff;
+}
+.duplicate-item.master {
+    border-left-color: #4CAF50;
+    font-weight: bold;
+    background: #e8f5e9;
+}
+.merge-group-btn {
+    margin-top: 8px;
+}
+</style>
