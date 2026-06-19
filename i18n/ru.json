@@ -1,12 +1,12 @@
 {
   "widget": {
     "name": "Автосклейка дублей",
-    "description": "Автоматически находит и объединяет дубликаты контактов по телефону и Telegram ID. Управление через карточку контакта.",
+    "description": "Автоматически находит и объединяет дубликаты контактов по телефону и Telegram ID",
     "short_description": "Автосклейка дубликатов",
-    "tour_description": ""
+    "tour_description": "Виджет в фоне отслеживает сохранение контактов и объединяет дубликаты"
   },
   "settings": {
     "api_token": "API токен для доступа к amoCRM",
-    "telegram_field_code": "Код поля с Telegram ID"
+    "telegram_field_code": "Код поля Telegram ID"
   }
 }
