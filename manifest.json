@@ -28,7 +28,7 @@
     },
     "auto_merge": {
       "name": "settings.auto_merge",
-      "type": "checkbox",
+      "type": "custom",
       "required": false,
       "default": false
     }
