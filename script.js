@@ -1,596 +1,324 @@
-define(['jquery'], function ($) {
-    var CustomWidget = function () {
-        var self = this;
-        var system = self.system();
-        var langs = self.langs;
+define(["jquery"], function ($) {
+  var CustomWidget = function () {
+    var self = this,
+      system = self.system(),
+      langs = self.langs;
 
-        // ---------- Retry-обёртка для API-запросов ----------
-        function apiCall(method, url, data, token, retries) {
-            retries = retries || 3;
-            var opts = {
-                url: url,
-                type: method,
-                headers: { 'Authorization': 'Bearer ' + token }
-            };
-            if (method === 'POST' || method === 'PATCH') {
-                opts.contentType = 'application/json';
-                opts.data = JSON.stringify(data);
-            }
-            if (method === 'GET' && data) {
-                opts.data = data;
-            }
-            return attempt(0);
-            function attempt(n) {
-                return $.ajax(opts).catch(function (err) {
-                    if (n < retries - 1 && isRetryable(err)) {
-                        return new Promise(function (resolve) {
-                            setTimeout(function () { resolve(attempt(n + 1)); }, 1000 * (n + 1));
-                        });
-                    }
-                    throw err;
-                });
-            }
-            function isRetryable(err) {
-                if (!err) return false;
-                var status = err.status || 0;
-                // 429 = too many requests, 5xx = server errors, 0 = network error
-                return status === 429 || status >= 500 || status === 0;
-            }
-        }
+    // ---------- Вспомогательные функции ----------
 
-        function apiGet(endpoint, params, token) {
-            return apiCall('GET', '/api/v4/' + endpoint, params, token);
-        }
+    function getFieldValues(contact, fieldCode) {
+      if (!contact.custom_fields_values) return [];
+      var field = contact.custom_fields_values.find(function (cf) {
+        return cf.field_code === fieldCode;
+      });
+      if (!field || !field.values) return [];
+      return field.values.map(function (v) { return (v.value || "").trim(); }).filter(Boolean);
+    }
 
-        function apiPatch(endpoint, data, token) {
-            return apiCall('PATCH', '/api/v4/' + endpoint, data, token);
-        }
+    function getGroupKey(values) {
+      if (!values || values.length === 0) return null;
+      return values.slice().sort().join("||");
+    }
 
-        function apiDelete(endpoint, token) {
-            return apiCall('DELETE', '/api/v4/' + endpoint, null, token);
-        }
+    // ---------- Загрузка всех контактов (пагинация) ----------
 
-        function apiPost(endpoint, data, token) {
-            return apiCall('POST', '/api/v4/' + endpoint, data, token);
-        }
-
-        function getFieldValues(contact, fieldCode) {
-            if (!contact.custom_fields_values) return [];
-            var field = contact.custom_fields_values.find(function (cf) {
-                return cf.field_code === fieldCode;
-            });
-            if (!field || !field.values) return [];
-            return field.values.map(function (v) { return (v.value || '').trim(); }).filter(Boolean);
-        }
-
-        function getGroupKey(values) {
-            if (!values || values.length === 0) return null;
-            return values.slice().sort().join('||');
-        }
-
-        // ---------- Загрузка ВСЕХ контактов (пагинация) ----------
-        async function fetchAllContacts(token) {
-            let allContacts = [];
-            let page = 1;
-            const limit = 250;
-            while (true) {
-                const resp = await apiGet('contacts', { page: page, limit: limit }, token);
-                if (!resp._embedded || !resp._embedded.contacts) break;
-                allContacts = allContacts.concat(resp._embedded.contacts);
-                if (resp._embedded.contacts.length < limit) break;
-                page++;
-            }
-            return allContacts;
-        }
-
-        // ---------- Поиск дубликатов по заданному массиву контактов ----------
-        // Оптимизация: строим карту телефон→id и tg→id за один проход,
-        // вместо вложенного цикла O(n²)
-        function findDuplicateGroups(contacts, telegramFieldCode) {
-            // Строим карты: значение поля → список id
-            var phoneMap = {};
-            var tgMap = {};
-            var contactsById = {};
-            contacts.forEach(function (c) {
-                contactsById[c.id] = c;
-                var phones = getFieldValues(c, 'PHONE');
-                var phoneKey = getGroupKey(phones);
-                if (phoneKey) {
-                    if (!phoneMap[phoneKey]) phoneMap[phoneKey] = [];
-                    phoneMap[phoneKey].push(c.id);
-                }
-                var tgs = getFieldValues(c, telegramFieldCode);
-                var tgKey = getGroupKey(tgs);
-                if (tgKey) {
-                    if (!tgMap[tgKey]) tgMap[tgKey] = [];
-                    tgMap[tgKey].push(c.id);
-                }
-            });
-
-            // Собираем группы
-            var processed = new Set();
-            var groups = [];
-
-            function addGroup(ids) {
-                ids = ids.filter(function (id) { return !processed.has(id); });
-                if (ids.length < 2) return;
-                ids.sort(function (a, b) { return a - b; });
-                processed.add(ids[0]);
-                var gContacts = ids.map(function (id) { return contactsById[id]; }).filter(Boolean);
-                groups.push({
-                    master_id: ids[0],
-                    ids: ids,
-                    contacts: gContacts
-                });
-                ids.forEach(function (id) { processed.add(id); });
-            }
-
-            // По телефону
-            Object.keys(phoneMap).forEach(function (key) {
-                addGroup(phoneMap[key]);
-            });
-
-            // По Telegram (пропускаем уже обработанные)
-            Object.keys(tgMap).forEach(function (key) {
-                var ids = tgMap[key].filter(function (id) { return !processed.has(id); });
-                if (ids.length >= 2) addGroup(ids);
-            });
-
-            return groups;
-        }
-
-        // ---------- Объединение группы ----------
-        async function mergeGroup(group, token, telegramFieldCode) {
-            const masterId = group.master_id;
-            const masterResp = await apiGet('contacts/' + masterId, {}, token);
-            const master = masterResp;
-            const duplicateIds = group.ids.filter(id => id !== masterId);
-
-            for (const dupId of duplicateIds) {
-                const dupResp = await apiGet('contacts/' + dupId, {}, token);
-                const dup = dupResp;
-                if (!dup) continue;
-
-                const updates = {};
-
-                // Имя — если у мастера пусто, берём от дубликата
-                if (dup.name && (!master.name || master.name.trim() === '')) {
-                    updates.name = dup.name;
-                }
-
-                // Поля
-                if (dup.custom_fields_values) {
-                    const newFields = [];
-                    dup.custom_fields_values.forEach(function (cf) {
-                        if (cf.field_code === 'PHONE') {
-                            var masterPhones = getFieldValues(master, 'PHONE');
-                            var dupPhones = getFieldValues(dup, 'PHONE');
-                            var allPhones = [...new Set([...masterPhones, ...dupPhones])];
-                            if (allPhones.length > 0) {
-                                newFields.push({
-                                    field_code: 'PHONE',
-                                    values: allPhones.map(function (p) {
-                                        return { value: p, enum_id: 'WORK' };
-                                    })
-                                });
-                            }
-                        } else if (cf.field_code === telegramFieldCode) {
-                            var masterTg = getFieldValues(master, telegramFieldCode);
-                            var dupTg = getFieldValues(dup, telegramFieldCode);
-                            var allTg = [...new Set([...masterTg, ...dupTg])];
-                            if (allTg.length > 0) {
-                                newFields.push({
-                                    field_code: telegramFieldCode,
-                                    values: allTg.map(function (t) { return { value: t }; })
-                                });
-                            }
-                        } else {
-                            var existing = master.custom_fields_values?.find(f => f.field_code === cf.field_code);
-                            if (!existing || !existing.values || existing.values.length === 0) {
-                                newFields.push(cf);
-                            }
-                        }
-                    });
-                    if (newFields.length > 0) updates.custom_fields_values = newFields;
-                }
-
-                if (Object.keys(updates).length > 0) {
-                    await apiPatch('contacts/' + masterId, updates, token);
-                }
-
-                // Перенос сделок
-                try {
-                    const linksResp = await apiGet('contacts/' + dupId + '/links', {}, token);
-                    if (linksResp._embedded && linksResp._embedded.links) {
-                        const leadLinks = linksResp._embedded.links.filter(l => l.to_entity_type === 'leads');
-                        for (const link of leadLinks) {
-                            await apiPost('contacts/' + masterId + '/link', [{
-                                to_entity_id: link.to_entity_id,
-                                to_entity_type: 'leads',
-                                metadata: link.metadata || {}
-                            }], token);
-                        }
-                    }
-                } catch (e) {
-                    console.warn('Не удалось перенести сделки для контакта ' + dupId, e);
-                }
-
-                // Удаляем дубликат
-                await apiDelete('contacts/' + dupId, token);
-            }
-        }
-
-        // ---------- Интерфейс настроек ----------
-        function initSettingsUI() {
-            self.getTemplate('widget', function (template) {
-                var settings = self.get_settings();
-                var html = template.render({ lang: langs, settings: settings });
-                var $container = $('.widget-settings__body').first();
-                if (!$container.length) {
-                    $container = $('<div class="widget-settings__body"></div>').appendTo('form');
-                }
-                $container.html(html);
-
-                var $scanBtn = $container.find('.merge-scan-btn');
-                var $status = $container.find('.merge-status');
-                var $error = $container.find('.merge-error');
-                var $results = $container.find('.merge-results');
-                var $groupsContainer = $container.find('.groups-container');
-                var $groupsCount = $container.find('.groups-count');
-
-                $scanBtn.on('click', async function () {
-                    var token = self.get_settings().api_token;
-                    var tgCode = self.get_settings().telegram_field_code || 'TELEGRAM_USERNAME_ID';
-                    if (!token) {
-                        $error.text('Ошибка: не указан API токен в настройках виджета.').show();
-                        return;
-                    }
-
-                    $scanBtn.prop('disabled', true);
-                    $status.show();
-                    $error.hide();
-                    $results.hide();
-
-                    try {
-                        const allContacts = await fetchAllContacts(token);
-                        const groups = findDuplicateGroups(allContacts, tgCode);
-                        $status.hide();
-
-                        if (groups.length === 0) {
-                            $status.text(langs.interface.no_duplicates).show();
-                            return;
-                        }
-
-                        $groupsCount.text(groups.length);
-                        $groupsContainer.empty();
-
-                        groups.forEach(function (group, idx) {
-                            var $groupDiv = $('<div class="duplicate-group"></div>');
-                            $groupDiv.append('<h5>Группа ' + (idx + 1) + ' (' + group.ids.length + ' контакта)</h5>');
-
-                            group.contacts.forEach(function (c) {
-                                var isMaster = c.id === group.master_id;
-                                var $item = $('<div class="duplicate-item' + (isMaster ? ' master' : '') + '"></div>');
-                                $item.text(c.name + ' (ID: ' + c.id + ')' + (isMaster ? ' ← Главный' : ''));
-                                $groupDiv.append($item);
-                            });
-
-                            var $mergeBtn = $('<button class="merge-group-btn am-button am-button--primary">' + langs.interface.merge_button + '</button>');
-                            $mergeBtn.on('click', async function () {
-                                $mergeBtn.prop('disabled', true).text(langs.interface.merging);
-                                try {
-                                    await mergeGroup(group, token, tgCode);
-                                    $mergeBtn.text(langs.interface.merged);
-                                    notifyUser('Группа объединена (мастер ID: ' + group.master_id + ')', false);
-                                    $groupDiv.fadeOut(500, function () {
-                                        var remaining = $('.duplicate-group:visible').length;
-                                        $groupsCount.text(remaining);
-                                        if (remaining === 0) $results.hide();
-                                    });
-                                } catch (err) {
-                                    $mergeBtn.prop('disabled', false).text(langs.interface.merge_button);
-                                    $error.text(langs.interface.error + ': ' + (err.message || '')).show();
-                                }
-                            });
-                            $groupDiv.append($mergeBtn);
-                            $groupsContainer.append($groupDiv);
-                        });
-
-                        $results.show();
-                    } catch (err) {
-                        $status.hide();
-                        $error.text(langs.interface.error + ': ' + (err.message || '')).show();
-                    } finally {
-                        $scanBtn.prop('disabled', false);
-                    }
-                });
-            });
-        }
-
-        // ---------- Автоматическое объединение ----------
-        async function handleAutoMerge(data) {
-            var settings = self.get_settings();
-            if (!settings.auto_merge) return;
-            var token = settings.api_token;
-            var tgCode = settings.telegram_field_code || 'TELEGRAM_USERNAME_ID';
-            if (!token) return;
-
-            var contactId = data.id;
-            if (!contactId) return;
-
+    function fetchAllContacts(token) {
+      return new Promise(function (resolve, reject) {
+        var all = [];
+        var page = 1;
+        var limit = 250;
+        function load() {
+          self.crm_post("/api/v4/contacts?page=" + page + "&limit=" + limit, {}, function (resp) {
             try {
-                var contactResp = await apiGet('contacts/' + contactId, {}, token);
-                var contact = contactResp;
-                if (!contact) return;
-
-                var phoneKey = getGroupKey(getFieldValues(contact, 'PHONE'));
-                var tgKey = getGroupKey(getFieldValues(contact, tgCode));
-                if (!phoneKey && !tgKey) return;
-
-                // Загружаем ВСЕ контакты для полного поиска дубликатов
-                var allContacts = await fetchAllContacts(token);
-                var candidates = allContacts.filter(function (c) {
-                    if (c.id === contactId) return false;
-                    if (phoneKey && getGroupKey(getFieldValues(c, 'PHONE')) === phoneKey) return true;
-                    if (tgKey && getGroupKey(getFieldValues(c, tgCode)) === tgKey) return true;
-                    return false;
-                });
-
-                if (candidates.length === 0) return;
-
-                var groupContacts = [contact, ...candidates];
-                var groupIds = groupContacts.map(c => c.id).sort((a,b) => a - b);
-                var masterId = groupIds[0];
-                var group = {
-                    master_id: masterId,
-                    ids: groupIds,
-                    contacts: groupContacts
-                };
-
-                console.log(langs.interface.log_prefix + 'Найден дубликат для контакта ' + contactId);
-                await mergeGroup(group, token, tgCode);
-                console.log(langs.interface.log_prefix + 'Дубликаты объединены, мастер: ' + masterId);
-                notifyUser('Автосклейка: дубликат объединён (мастер ID: ' + masterId + ')', false);
+              var data = JSON.parse(resp);
+              if (data._embedded && data._embedded.contacts) {
+                all = all.concat(data._embedded.contacts);
+                if (data._embedded.contacts.length < limit) {
+                  resolve(all);
+                } else {
+                  page++;
+                  load();
+                }
+              } else {
+                resolve(all);
+              }
             } catch (e) {
-                console.error(langs.interface.log_prefix + 'Ошибка автообъединения: ', e);
-                notifyUser('Ошибка автосклейки: ' + (e.message || 'неизвестная ошибка'), true);
+              reject(e);
             }
+          }, "text", function () {
+            reject(new Error("Ошибка загрузки контактов"));
+          });
         }
+        load();
+      });
+    }
 
-        // ---------- Уведомления для пользователя ----------
-        function notifyUser(message, isError) {
-            var $existing = $('.antidupl-notification');
-            if ($existing.length) $existing.remove();
+    // ---------- Поиск дубликатов ----------
 
-            var $notif = $('<div class="antidupl-notification" style="position:fixed;top:20px;right:20px;z-index:99999;padding:12px 20px;border-radius:6px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);max-width:400px;"></div>');
-            $notif.css('background', isError ? '#ffebee' : '#e8f5e9');
-            $notif.css('color', isError ? '#c62828' : '#2e7d32');
-            $notif.css('border', isError ? '1px solid #ef9a9a' : '1px solid #a5d6a7');
-            $notif.text(message);
-            $('body').append($notif);
-            setTimeout(function () { $notif.fadeOut(300, function () { $notif.remove(); }); }, 5000);
+    function findDuplicateGroups(contacts, tgCode) {
+      var phoneMap = {};
+      var tgMap = {};
+      var byId = {};
+      contacts.forEach(function (c) {
+        byId[c.id] = c;
+        var pk = getGroupKey(getFieldValues(c, "PHONE"));
+        if (pk) { if (!phoneMap[pk]) phoneMap[pk] = []; phoneMap[pk].push(c.id); }
+        var tk = getGroupKey(getFieldValues(c, tgCode));
+        if (tk) { if (!tgMap[tk]) tgMap[tk] = []; tgMap[tk].push(c.id); }
+      });
+      var processed = new Set();
+      var groups = [];
+      function addGroup(ids) {
+        ids = ids.filter(function (id) { return !processed.has(id); });
+        if (ids.length < 2) return;
+        ids.sort(function (a, b) { return a - b; });
+        ids.forEach(function (id) { processed.add(id); });
+        groups.push({
+          master_id: ids[0],
+          ids: ids,
+          contacts: ids.map(function (id) { return byId[id]; }).filter(Boolean)
+        });
+      }
+      Object.keys(phoneMap).forEach(function (k) { addGroup(phoneMap[k]); });
+      Object.keys(tgMap).forEach(function (k) {
+        var ids = tgMap[k].filter(function (id) { return !processed.has(id); });
+        if (ids.length >= 2) addGroup(ids);
+      });
+      return groups;
+    }
+
+    // ---------- API запросы ----------
+
+    function apiGet(url, token) {
+      return new Promise(function (resolve, reject) {
+        self.crm_post(url, {}, function (resp) {
+          try { resolve(JSON.parse(resp)); } catch (e) { reject(e); }
+        }, "text", function () { reject(new Error("GET " + url)); });
+      });
+    }
+
+    function apiPatch(url, data, token) {
+      return new Promise(function (resolve, reject) {
+        $.ajax({
+          url: url,
+          type: "PATCH",
+          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+          data: JSON.stringify(data)
+        }).done(function (r) { resolve(r); }).fail(function (e) { reject(e); });
+      });
+    }
+
+    function apiDelete(url, token) {
+      return new Promise(function (resolve, reject) {
+        $.ajax({
+          url: url,
+          type: "DELETE",
+          headers: { "Authorization": "Bearer " + token }
+        }).done(function (r) { resolve(r); }).fail(function (e) { reject(e); });
+      });
+    }
+
+    function apiPost(url, data, token) {
+      return new Promise(function (resolve, reject) {
+        $.ajax({
+          url: url,
+          type: "POST",
+          headers: { "Authorization": "Bearer " + token, "Content-Type": "application/json" },
+          data: JSON.stringify(data)
+        }).done(function (r) { resolve(r); }).fail(function (e) { reject(e); });
+      });
+    }
+
+    // ---------- Объединение группы ----------
+
+    async function mergeGroup(group, token, tgCode) {
+      var masterId = group.master_id;
+      var dupIds = group.ids.filter(function (id) { return id !== masterId; });
+      var master = await apiGet("/api/v4/contacts/" + masterId, token);
+      for (var d = 0; d < dupIds.length; d++) {
+        var dupId = dupIds[d];
+        var dup = await apiGet("/api/v4/contacts/" + dupId, token);
+        if (!dup) continue;
+        var updates = {};
+        if (dup.name && (!master.name || master.name.trim() === "")) {
+          updates.name = dup.name;
         }
-
-        // ---------- Рендеринг в карточке контакта ----------
-        function initCardUI() {
-            var settings = self.get_settings();
-            var captionText = langs.widget.short_description;
-
-            var statusMsg;
-            if (!settings.api_token) {
-                statusMsg = '<p style="margin:0;color:#888;">' + langs.interface.no_token + '</p>';
+        if (dup.custom_fields_values) {
+          var newFields = [];
+          dup.custom_fields_values.forEach(function (cf) {
+            if (cf.field_code === "PHONE") {
+              var allPhones = [...new Set([...getFieldValues(master, "PHONE"), ...getFieldValues(dup, "PHONE")])];
+              if (allPhones.length) newFields.push({ field_code: "PHONE", values: allPhones.map(function (p) { return { value: p, enum_id: "WORK" }; }) });
+            } else if (cf.field_code === tgCode) {
+              var allTg = [...new Set([...getFieldValues(master, tgCode), ...getFieldValues(dup, tgCode)])];
+              if (allTg.length) newFields.push({ field_code: tgCode, values: allTg.map(function (t) { return { value: t }; }) });
             } else {
-                statusMsg = settings.auto_merge
-                    ? '<p style="margin:0;color:#2e7d32;">✅ ' + langs.interface.auto_merge_status + '</p>'
-                    : '<p style="margin:0;color:#888;">⚪ ' + langs.interface.auto_merge_disabled + '</p>';
+              var exists = master.custom_fields_values && master.custom_fields_values.find(function (f) { return f.field_code === cf.field_code; });
+              if (!exists || !exists.values || !exists.values.length) newFields.push(cf);
             }
-
-            var html =
-                '<div class="antidupl-card-widget" style="padding:12px 15px;font-size:13px;line-height:1.5;">' +
-                '<div style="font-weight:600;font-size:14px;margin-bottom:8px;color:#333;">' + captionText + '</div>' +
-                statusMsg +
-                '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">' +
-                '<button class="antidupl-scan-btn am-button am-button--success" style="width:100%;padding:8px;font-size:13px;cursor:pointer;border:none;border-radius:4px;background:#4CAF50;color:#fff;">' +
-                langs.interface.scan_button_short +
-                '</button>' +
-                '<button class="antidupl-settings-btn am-button" style="width:100%;margin-top:6px;padding:8px;font-size:13px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#f5f5f5;color:#555;">' +
-                '⚙️ ' + langs.interface.settings_btn +
-                '</button>' +
-                '</div>' +
-                '</div>';
-
-            // Находим контейнер виджета и вставляем HTML
-            var wCode = self.params.widget_code;
-            var $widgetArea = $('.card-widgets__widget-' + wCode + ' .card-widgets__widget__body');
-            if ($widgetArea.length) {
-                $widgetArea.html(html);
-            } else {
-                $('.card-widgets__widget__body').first().html(html);
+          });
+          if (newFields.length) updates.custom_fields_values = newFields;
+        }
+        if (Object.keys(updates).length) await apiPatch("/api/v4/contacts/" + masterId, updates, token);
+        try {
+          var links = await apiGet("/api/v4/contacts/" + dupId + "/links", token);
+          if (links._embedded && links._embedded.links) {
+            var leads = links._embedded.links.filter(function (l) { return l.to_entity_type === "leads"; });
+            for (var i = 0; i < leads.length; i++) {
+              await apiPost("/api/v4/contacts/" + masterId + "/link", [{ to_entity_id: leads[i].to_entity_id, to_entity_type: "leads", metadata: leads[i].metadata || {} }], token);
             }
+          }
+        } catch (e) {}
+        await apiDelete("/api/v4/contacts/" + dupId, token);
+      }
+    }
 
-            // Навешиваем обработчики
-            $('.antidupl-scan-btn').on('click', async function () {
-                var token = self.get_settings().api_token;
-                var tgCode = self.get_settings().telegram_field_code || 'TELEGRAM_USERNAME_ID';
-                if (!token) {
-                    notifyUser('Не указан API токен в настройках!', true);
-                    return;
-                }
-                $(this).prop('disabled', true).text(langs.interface.scanning);
-                try {
-                    const allContacts = await fetchAllContacts(token);
-                    const groups = findDuplicateGroups(allContacts, tgCode);
-                    if (groups.length === 0) {
-                        notifyUser(langs.interface.no_duplicates, false);
-                    } else {
-                        notifyUser(langs.interface.found_groups + ' ' + groups.length, false);
-                    }
-                    // Если есть группы — показываем результат
-                    if (groups.length > 0) {
-                        showMergeDialog(groups, token, tgCode);
-                    }
-                } catch (err) {
-                    notifyUser(langs.interface.error + ': ' + (err.message || ''), true);
-                } finally {
-                    $(this).prop('disabled', false).text(langs.interface.scan_button_short);
-                }
-            });
+    // ---------- Уведомление ----------
 
-            $('.antidupl-settings-btn').on('click', function () {
-                showSettingsDialog();
-            });
+    function notify(msg, isErr) {
+      var $n = $('<div style="position:fixed;top:20px;right:20px;z-index:99999;padding:12px 20px;border-radius:6px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);max-width:400px;"></div>');
+      $n.css("background", isErr ? "#ffebee" : "#e8f5e9");
+      $n.css("color", isErr ? "#c62828" : "#2e7d32");
+      $n.css("border", isErr ? "1px solid #ef9a9a" : "1px solid #a5d6a7");
+      $n.text(msg);
+      $("body").append($n);
+      setTimeout(function () { $n.fadeOut(300, function () { $n.remove(); }); }, 4000);
+    }
+
+    // ---------- Рендеринг в карточке ----------
+
+    function initCard() {
+      var settings = self.get_settings();
+      var apiToken = settings.api_token || "";
+      var tgCode = settings.telegram_field_code || "TELEGRAM_USERNAME_ID";
+
+      var html = '<div style="padding:12px 15px;font-size:13px;line-height:1.5;">' +
+        '<div style="font-weight:600;font-size:14px;margin-bottom:10px;color:#333;">' + langs.widget.short_description + '</div>';
+
+      if (!apiToken) {
+        html += '<p style="color:#888;margin:0 0 10px;">Не указан API токен</p>';
+      }
+
+      html += '<button class="adu-scan-btn" style="width:100%;padding:8px;font-size:13px;cursor:pointer;border:none;border-radius:4px;background:#4CAF50;color:#fff;margin-bottom:6px;">Сканировать</button>' +
+        '<button class="adu-settings-btn" style="width:100%;padding:8px;font-size:13px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#f5f5f5;color:#555;">Настройки</button>' +
+        '</div>';
+
+      var wCode = self.params.widget_code;
+      var $body = $(".card-widgets__widget-" + wCode + " .card-widgets__widget__body");
+      if (!$body.length) $body = $(".card-widgets__widget__body").first();
+      if ($body.length) $body.html(html);
+
+      $(".adu-scan-btn").on("click", function () { onScan(apiToken, tgCode, $(this)); });
+      $(".adu-settings-btn").on("click", function () { showSettings(); });
+    }
+
+    // ---------- Сканирование ----------
+
+    async function onScan(token, tgCode, $btn) {
+      if (!token) { notify("Укажите API токен в настройках", true); return; }
+      $btn.prop("disabled", true).text("Поиск...");
+      try {
+        var contacts = await fetchAllContacts(token);
+        var groups = findDuplicateGroups(contacts, tgCode);
+        $btn.prop("disabled", false).text("Сканировать");
+        if (groups.length === 0) {
+          notify("Дубликаты не найдены", false);
+          return;
         }
+        showMergeModal(groups, token, tgCode);
+      } catch (e) {
+        $btn.prop("disabled", false).text("Сканировать");
+        notify("Ошибка: " + (e.message || ""), true);
+      }
+    }
 
-        // ---------- Модальное окно с результатами сканирования ----------
-        function showMergeDialog(groups, token, tgCode) {
-            var html = '<div class="antidupl-modal-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
-                '<div class="antidupl-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:500px;max-height:80vh;overflow-y:auto;padding:20px;">' +
-                '<h3 style="margin:0 0 10px;font-size:16px;">' + langs.interface.found_groups + ' ' + groups.length + '</h3>';
+    // ---------- Модальное окно результатов ----------
 
-            groups.forEach(function (group, idx) {
-                html += '<div class="antidupl-merge-group" style="border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:8px;">' +
-                    '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">' + langs.interface.group_label + ' ' + (idx + 1) + ' (' + group.ids.length + ' ' + langs.interface.contacts_label + ')</div>';
-                group.contacts.forEach(function (c) {
-                    var isMaster = c.id === group.master_id;
-                    html += '<div style="padding:3px 6px;font-size:12px;' + (isMaster ? 'background:#e8f5e9;font-weight:bold;' : '') + '">' +
-                        c.name + ' (ID: ' + c.id + ')' + (isMaster ? ' ← ' + langs.interface.master_contact : '') + '</div>';
-                });
-                html += '<button class="antidupl-merge-btn" data-group-idx="' + idx + '" style="margin-top:8px;padding:5px 12px;font-size:12px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;">' +
-                    langs.interface.merge_button + '</button>' +
-                    '</div>';
-            });
+    function showMergeModal(groups, token, tgCode) {
+      var html = '<div class="adu-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
+        '<div class="adu-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:520px;max-height:80vh;overflow-y:auto;padding:20px;">' +
+        '<h3 style="margin:0 0 12px;font-size:16px;">Найдено групп: ' + groups.length + '</h3>';
 
-            html += '<div style="text-align:right;margin-top:10px;">' +
-                '<button class="antidupl-modal-close" style="padding:6px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;">' + langs.interface.close_btn + '</button>' +
-                '</div></div>';
+      groups.forEach(function (g, idx) {
+        html += '<div class="adu-group" style="border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:8px;" data-idx="' + idx + '">' +
+          '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">Группа ' + (idx + 1) + ' (' + g.ids.length + ' конт.)</div>';
+        g.contacts.forEach(function (c) {
+          html += '<div style="padding:2px 6px;font-size:12px;' + (c.id === g.master_id ? 'background:#e8f5e9;font-weight:bold;' : '') + '">' +
+            c.name + ' (ID:' + c.id + ')' + (c.id === g.master_id ? ' ← главный' : '') + '</div>';
+        });
+        html += '<button class="adu-merge-btn" data-idx="' + idx + '" style="margin-top:8px;padding:5px 12px;font-size:12px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;">Объединить</button></div>';
+      });
 
-            $('body').append(html);
+      html += '<div style="text-align:right;margin-top:10px;"><button class="adu-close" style="padding:6px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;">Закрыть</button></div></div>';
+      $("body").append(html);
 
-            // Обработчики
-            $('.antidupl-modal-close, .antidupl-modal-overlay').on('click', function () {
-                $('.antidupl-modal, .antidupl-modal-overlay').remove();
-            });
-
-            $('.antidupl-merge-btn').on('click', async function () {
-                var idx = parseInt($(this).data('group-idx'));
-                var group = groups[idx];
-                var $btn = $(this);
-                var $groupDiv = $btn.closest('.antidupl-merge-group');
-                $btn.prop('disabled', true).text(langs.interface.merging);
-                try {
-                    await mergeGroup(group, token, tgCode);
-                    $btn.text('✅ ' + langs.interface.merged);
-                    $groupDiv.fadeOut(300);
-                    notifyUser(langs.interface.merged + ' (ID: ' + group.master_id + ')', false);
-                } catch (err) {
-                    $btn.prop('disabled', false).text(langs.interface.merge_button);
-                    notifyUser(langs.interface.error + ': ' + (err.message || ''), true);
-                }
-            });
+      $(".adu-close, .adu-overlay").on("click", function () { $(".adu-modal, .adu-overlay").remove(); });
+      $(".adu-merge-btn").on("click", async function () {
+        var idx = parseInt($(this).data("idx"));
+        var $btn = $(this);
+        var $grp = $btn.closest(".adu-group");
+        $btn.prop("disabled", true).text("Объединение...");
+        try {
+          await mergeGroup(groups[idx], token, tgCode);
+          $btn.text("✅ Готово");
+          $grp.fadeOut(300);
+          notify("Объединено!", false);
+        } catch (e) {
+          $btn.prop("disabled", false).text("Объединить");
+          notify("Ошибка: " + (e.message || ""), true);
         }
+      });
+    }
 
-        // ---------- Модальное окно настроек ----------
-        function showSettingsDialog() {
-            var settings = self.get_settings();
-            var html = '<div class="antidupl-modal-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
-                '<div class="antidupl-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:460px;padding:24px;">' +
-                '<h3 style="margin:0 0 16px;font-size:18px;">⚙️ ' + langs.interface.settings_title + '</h3>' +
+    // ---------- Настройки ----------
 
-                '<div style="margin-bottom:14px;">' +
-                '<label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:#333;">' + langs.settings.api_token + '</label>' +
-                '<input class="antidupl-input-token" type="text" value="' + (settings.api_token || '') + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;">' +
-                '</div>' +
+    function showSettings() {
+      var s = self.get_settings();
+      var html = '<div class="adu-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
+        '<div class="adu-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:440px;padding:24px;">' +
+        '<h3 style="margin:0 0 16px;font-size:18px;">Настройки виджета</h3>' +
+        '<div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">API токен</label>' +
+        '<input class="adu-inp-token" type="text" value="' + (s.api_token || "") + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;"></div>' +
+        '<div style="margin-bottom:12px;"><label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;">Код поля Telegram</label>' +
+        '<input class="adu-inp-tg" type="text" value="' + (s.telegram_field_code || "TELEGRAM_USERNAME_ID") + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;">' +
+        '<button class="adu-settings-cancel" style="padding:8px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;font-size:13px;">Отмена</button>' +
+        '<button class="adu-settings-save" style="padding:8px 16px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;font-size:13px;">Сохранить</button></div></div>';
+      $("body").append(html);
 
-                '<div style="margin-bottom:14px;">' +
-                '<label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:#333;">' + langs.settings.telegram_field_code + '</label>' +
-                '<input class="antidupl-input-tgfield" type="text" value="' + (settings.telegram_field_code || 'TELEGRAM_USERNAME_ID') + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;">' +
-                '</div>' +
+      $(".adu-settings-cancel, .adu-overlay").on("click", function () { $(".adu-modal, .adu-overlay").remove(); });
+      $(".adu-settings-save").on("click", function () {
+        self.set_settings({
+          api_token: $(".adu-inp-token").val(),
+          telegram_field_code: $(".adu-inp-tg").val()
+        });
+        notify("Настройки сохранены", false);
+        $(".adu-modal, .adu-overlay").remove();
+        initCard();
+      });
+    }
 
-                '<div style="margin-bottom:20px;">' +
-                '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">' +
-                '<input class="antidupl-input-automerge" type="checkbox" ' + (settings.auto_merge ? 'checked' : '') + '> ' +
-                langs.settings.auto_merge +
-                '</label>' +
-                '</div>' +
+    // ---------- Callbacks ----------
 
-                '<div style="display:flex;justify-content:flex-end;gap:8px;">' +
-                '<button class="antidupl-settings-cancel" style="padding:8px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;font-size:13px;">' + langs.interface.cancel_btn + '</button>' +
-                '<button class="antidupl-settings-save" style="padding:8px 16px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;font-size:13px;">' + langs.interface.save_btn + '</button>' +
-                '</div>' +
-
-                '</div>';
-
-            $('body').append(html);
-
-            // Обработчики
-            $('.antidupl-settings-cancel, .antidupl-modal-overlay').on('click', function () {
-                $('.antidupl-modal, .antidupl-modal-overlay').remove();
-            });
-
-            $('.antidupl-settings-save').on('click', function () {
-                var newSettings = {
-                    api_token: $('.antidupl-input-token').val(),
-                    telegram_field_code: $('.antidupl-input-tgfield').val(),
-                    auto_merge: $('.antidupl-input-automerge').is(':checked')
-                };
-                self.set_settings(newSettings);
-                notifyUser(langs.interface.settings_saved, false);
-                $('.antidupl-modal, .antidupl-modal-overlay').remove();
-                // Обновляем UI в карточке
-                initCardUI();
-            });
+    this.callbacks = {
+      render: function () {
+        if (system.area === "ccard") {
+          if (typeof APP !== "undefined" && APP.data && APP.data.current_card && APP.data.current_card.id === 0) return false;
+          initCard();
         }
-
-        // ---------- Callbacks ----------
-        this.callbacks = {
-            render: function () {
-                var area = system.area;
-                if (area === 'ccard') {
-                    if (typeof (APP.data.current_card) != 'undefined' && APP.data.current_card.id == 0) {
-                        return false;
-                    }
-                    initCardUI();
-                }
-                return true;
-            },
-
-            init: function () {
-                return true;
-            },
-
-            bind_actions: function () {
-                return true;
-            },
-
-            settings: function ($modal_body) {
-                $modal_body = $modal_body || $('.widget-settings__body').first();
-                initSettingsUI();
-                return true;
-            },
-
-            onSave: function (data) {
-                handleAutoMerge(data);
-                return true;
-            },
-
-            destroy: function () {
-                return true;
-            },
-
-            contacts: { selected: function () { return true; } },
-            leads: { selected: function () { return true; } },
-            todo: { selected: function () { return true; } }
-        };
-
-        self.getTemplate = function (template, callback) {
-            return self.render({
-                href: '/templates/' + template + '.twig',
-                base_path: self.params.path,
-                load: callback
-            }, {});
-        };
-
-        return this;
+        return true;
+      },
+      init: function () { return true; },
+      bind_actions: function () { return true; },
+      settings: function () { return true; },
+      onSave: function () { return true; },
+      destroy: function () { return true; },
+      contacts: { selected: function () {} },
+      leads: { selected: function () {} },
+      todo: { selected: function () {} }
     };
-    return CustomWidget;
+
+    return this;
+  };
+  return CustomWidget;
 });

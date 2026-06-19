@@ -3,7 +3,7 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "3.3.0",
+    "version": "1.0.0",
     "interface_version": 2,
     "init_once": false,
     "locale": ["ru"],
@@ -13,7 +13,9 @@
       "email": "epifan1337@mail.ru"
     }
   },
-  "locations": ["ccard-1", "settings"],
+  "locations": [
+    "ccard-1"
+  ],
   "settings": {
     "api_token": {
       "name": "settings.api_token",
@@ -25,12 +27,6 @@
       "type": "text",
       "required": false,
       "default": "TELEGRAM_USERNAME_ID"
-    },
-    "auto_merge": {
-      "name": "settings.auto_merge",
-      "type": "custom",
-      "required": false,
-      "default": false
     }
   },
   "tour": {
