@@ -3,7 +3,7 @@
     "name": "widget.name",
     "description": "widget.description",
     "short_description": "widget.short_description",
-    "version": "3.1.0",
+    "version": "3.3.0",
     "interface_version": 2,
     "init_once": false,
     "locale": ["ru"],
@@ -29,6 +29,7 @@
     "auto_merge": {
       "name": "settings.auto_merge",
       "type": "checkbox",
+      "required": false,
       "default": false
     }
   },
