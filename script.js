@@ -374,28 +374,44 @@ define(['jquery'], function ($) {
         // ---------- Рендеринг в карточке контакта ----------
         function initCardUI() {
             var settings = self.get_settings();
+            var captionText = langs.widget.short_description;
+
+            var statusMsg;
             if (!settings.api_token) {
-                self.render_template({
-                    caption: { class_name: 'antidupl-caption', html: langs.widget.short_description },
-                    body: '',
-                    render: '<div class="antidupl-card" style="padding:10px;font-size:13px;color:#888;">' +
-                        '<p>' + langs.interface.no_token + '</p>' +
-                        '</div>'
-                });
-                return;
+                statusMsg = '<p style="margin:0;color:#888;">' + langs.interface.no_token + '</p>';
+            } else {
+                statusMsg = settings.auto_merge
+                    ? '<p style="margin:0;color:#2e7d32;">✅ ' + langs.interface.auto_merge_status + '</p>'
+                    : '<p style="margin:0;color:#888;">⚪ ' + langs.interface.auto_merge_disabled + '</p>';
             }
 
-            var autoMergeStatus = settings.auto_merge
-                ? langs.interface.auto_merge_status
-                : langs.interface.auto_merge_disabled;
+            var html =
+                '<div class="antidupl-card-widget" style="padding:12px 15px;font-size:13px;line-height:1.5;">' +
+                '<div style="font-weight:600;font-size:14px;margin-bottom:8px;color:#333;">' + captionText + '</div>' +
+                statusMsg +
+                '</div>';
 
-            self.render_template({
-                caption: { class_name: 'antidupl-caption', html: langs.widget.short_description },
-                body: '',
-                render: '<div class="antidupl-card" style="padding:10px;font-size:13px;">' +
-                    '<p style="margin:0 0 5px;color:#555;">' + autoMergeStatus + '</p>' +
-                    '</div>'
-            });
+            // Ищем контейнер виджета в правой колонке
+            var $widgetBody = $('.card-widgets__widget__body').filter(function () {
+                return $(this).closest('[data-widget]').length > 0;
+            }).first();
+
+            if ($widgetBody.length) {
+                $widgetBody.html(html);
+            } else {
+                // fallback: ищем по class виджета
+                var wCode = self.params.widget_code;
+                var $widgetArea = $('.card-widgets__widget-' + wCode + ' .card-widgets__widget__body');
+                if ($widgetArea.length) {
+                    $widgetArea.html(html);
+                } else {
+                    // последний fallback — просто в конец .card-widgets
+                    $('.card-widgets').append(
+                        '<div class="card-widgets__widget card-widgets__widget-' + wCode + '" style="padding:0;">' +
+                        '<div class="card-widgets__widget__body">' + html + '</div></div>'
+                    );
+                }
+            }
         }
 
         // ---------- Callbacks ----------
