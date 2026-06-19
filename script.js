@@ -281,6 +281,7 @@ define(['jquery'], function ($) {
                                 try {
                                     await mergeGroup(group, token, tgCode);
                                     $mergeBtn.text(langs.interface.merged);
+                                    notifyUser('Группа объединена (мастер ID: ' + group.master_id + ')', false);
                                     $groupDiv.fadeOut(500, function () {
                                         var remaining = $('.duplicate-group:visible').length;
                                         $groupsCount.text(remaining);
@@ -349,18 +350,30 @@ define(['jquery'], function ($) {
                 console.log(langs.interface.log_prefix + 'Найден дубликат для контакта ' + contactId);
                 await mergeGroup(group, token, tgCode);
                 console.log(langs.interface.log_prefix + 'Дубликаты объединены, мастер: ' + masterId);
+                notifyUser('Автосклейка: дубликат объединён (мастер ID: ' + masterId + ')', false);
             } catch (e) {
                 console.error(langs.interface.log_prefix + 'Ошибка автообъединения: ', e);
+                notifyUser('Ошибка автосклейки: ' + (e.message || 'неизвестная ошибка'), true);
             }
+        }
+
+        // ---------- Уведомления для пользователя ----------
+        function notifyUser(message, isError) {
+            var $existing = $('.antidupl-notification');
+            if ($existing.length) $existing.remove();
+
+            var $notif = $('<div class="antidupl-notification" style="position:fixed;top:20px;right:20px;z-index:99999;padding:12px 20px;border-radius:6px;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.15);max-width:400px;"></div>');
+            $notif.css('background', isError ? '#ffebee' : '#e8f5e9');
+            $notif.css('color', isError ? '#c62828' : '#2e7d32');
+            $notif.css('border', isError ? '1px solid #ef9a9a' : '1px solid #a5d6a7');
+            $notif.text(message);
+            $('body').append($notif);
+            setTimeout(function () { $notif.fadeOut(300, function () { $notif.remove(); }); }, 5000);
         }
 
         // ---------- Callbacks ----------
         this.callbacks = {
             render: function () {
-                var area = system.area;
-                if (area === 'settings') {
-                    initSettingsUI();
-                }
                 return true;
             },
 
@@ -372,7 +385,9 @@ define(['jquery'], function ($) {
                 return true;
             },
 
-            settings: function () {
+            settings: function ($modal_body) {
+                $modal_body = $modal_body || $('.widget-settings__body').first();
+                initSettingsUI();
                 return true;
             },
 
