@@ -371,9 +371,43 @@ define(['jquery'], function ($) {
             setTimeout(function () { $notif.fadeOut(300, function () { $notif.remove(); }); }, 5000);
         }
 
+        // ---------- Рендеринг в карточке контакта ----------
+        function initCardUI() {
+            var settings = self.get_settings();
+            if (!settings.api_token) {
+                self.render_template({
+                    caption: { class_name: 'antidupl-caption', html: langs.widget.short_description },
+                    body: '',
+                    render: '<div class="antidupl-card" style="padding:10px;font-size:13px;color:#888;">' +
+                        '<p>' + langs.interface.no_token + '</p>' +
+                        '</div>'
+                });
+                return;
+            }
+
+            var autoMergeStatus = settings.auto_merge
+                ? langs.interface.auto_merge_status
+                : langs.interface.auto_merge_disabled;
+
+            self.render_template({
+                caption: { class_name: 'antidupl-caption', html: langs.widget.short_description },
+                body: '',
+                render: '<div class="antidupl-card" style="padding:10px;font-size:13px;">' +
+                    '<p style="margin:0 0 5px;color:#555;">' + autoMergeStatus + '</p>' +
+                    '</div>'
+            });
+        }
+
         // ---------- Callbacks ----------
         this.callbacks = {
             render: function () {
+                var area = system.area;
+                if (area === 'ccard') {
+                    if (typeof (APP.data.current_card) != 'undefined' && APP.data.current_card.id == 0) {
+                        return false;
+                    }
+                    initCardUI();
+                }
                 return true;
             },
 
