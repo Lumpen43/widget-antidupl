@@ -389,29 +389,156 @@ define(['jquery'], function ($) {
                 '<div class="antidupl-card-widget" style="padding:12px 15px;font-size:13px;line-height:1.5;">' +
                 '<div style="font-weight:600;font-size:14px;margin-bottom:8px;color:#333;">' + captionText + '</div>' +
                 statusMsg +
+                '<div style="margin-top:10px;padding-top:10px;border-top:1px solid #e0e0e0;">' +
+                '<button class="antidupl-scan-btn am-button am-button--success" style="width:100%;padding:8px;font-size:13px;cursor:pointer;border:none;border-radius:4px;background:#4CAF50;color:#fff;">' +
+                langs.interface.scan_button_short +
+                '</button>' +
+                '<button class="antidupl-settings-btn am-button" style="width:100%;margin-top:6px;padding:8px;font-size:13px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#f5f5f5;color:#555;">' +
+                '⚙️ ' + langs.interface.settings_btn +
+                '</button>' +
+                '</div>' +
                 '</div>';
 
-            // Ищем контейнер виджета в правой колонке
-            var $widgetBody = $('.card-widgets__widget__body').filter(function () {
-                return $(this).closest('[data-widget]').length > 0;
-            }).first();
-
-            if ($widgetBody.length) {
-                $widgetBody.html(html);
+            // Находим контейнер виджета и вставляем HTML
+            var wCode = self.params.widget_code;
+            var $widgetArea = $('.card-widgets__widget-' + wCode + ' .card-widgets__widget__body');
+            if ($widgetArea.length) {
+                $widgetArea.html(html);
             } else {
-                // fallback: ищем по class виджета
-                var wCode = self.params.widget_code;
-                var $widgetArea = $('.card-widgets__widget-' + wCode + ' .card-widgets__widget__body');
-                if ($widgetArea.length) {
-                    $widgetArea.html(html);
-                } else {
-                    // последний fallback — просто в конец .card-widgets
-                    $('.card-widgets').append(
-                        '<div class="card-widgets__widget card-widgets__widget-' + wCode + '" style="padding:0;">' +
-                        '<div class="card-widgets__widget__body">' + html + '</div></div>'
-                    );
-                }
+                $('.card-widgets__widget__body').first().html(html);
             }
+
+            // Навешиваем обработчики
+            $('.antidupl-scan-btn').on('click', async function () {
+                var token = self.get_settings().api_token;
+                var tgCode = self.get_settings().telegram_field_code || 'TELEGRAM_USERNAME_ID';
+                if (!token) {
+                    notifyUser('Не указан API токен в настройках!', true);
+                    return;
+                }
+                $(this).prop('disabled', true).text(langs.interface.scanning);
+                try {
+                    const allContacts = await fetchAllContacts(token);
+                    const groups = findDuplicateGroups(allContacts, tgCode);
+                    if (groups.length === 0) {
+                        notifyUser(langs.interface.no_duplicates, false);
+                    } else {
+                        notifyUser(langs.interface.found_groups + ' ' + groups.length, false);
+                    }
+                    // Если есть группы — показываем результат
+                    if (groups.length > 0) {
+                        showMergeDialog(groups, token, tgCode);
+                    }
+                } catch (err) {
+                    notifyUser(langs.interface.error + ': ' + (err.message || ''), true);
+                } finally {
+                    $(this).prop('disabled', false).text(langs.interface.scan_button_short);
+                }
+            });
+
+            $('.antidupl-settings-btn').on('click', function () {
+                showSettingsDialog();
+            });
+        }
+
+        // ---------- Модальное окно с результатами сканирования ----------
+        function showMergeDialog(groups, token, tgCode) {
+            var html = '<div class="antidupl-modal-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
+                '<div class="antidupl-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:500px;max-height:80vh;overflow-y:auto;padding:20px;">' +
+                '<h3 style="margin:0 0 10px;font-size:16px;">' + langs.interface.found_groups + ' ' + groups.length + '</h3>';
+
+            groups.forEach(function (group, idx) {
+                html += '<div class="antidupl-merge-group" style="border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:8px;">' +
+                    '<div style="font-weight:600;font-size:13px;margin-bottom:6px;">' + langs.interface.group_label + ' ' + (idx + 1) + ' (' + group.ids.length + ' ' + langs.interface.contacts_label + ')</div>';
+                group.contacts.forEach(function (c) {
+                    var isMaster = c.id === group.master_id;
+                    html += '<div style="padding:3px 6px;font-size:12px;' + (isMaster ? 'background:#e8f5e9;font-weight:bold;' : '') + '">' +
+                        c.name + ' (ID: ' + c.id + ')' + (isMaster ? ' ← ' + langs.interface.master_contact : '') + '</div>';
+                });
+                html += '<button class="antidupl-merge-btn" data-group-idx="' + idx + '" style="margin-top:8px;padding:5px 12px;font-size:12px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;">' +
+                    langs.interface.merge_button + '</button>' +
+                    '</div>';
+            });
+
+            html += '<div style="text-align:right;margin-top:10px;">' +
+                '<button class="antidupl-modal-close" style="padding:6px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;">' + langs.interface.close_btn + '</button>' +
+                '</div></div>';
+
+            $('body').append(html);
+
+            // Обработчики
+            $('.antidupl-modal-close, .antidupl-modal-overlay').on('click', function () {
+                $('.antidupl-modal, .antidupl-modal-overlay').remove();
+            });
+
+            $('.antidupl-merge-btn').on('click', async function () {
+                var idx = parseInt($(this).data('group-idx'));
+                var group = groups[idx];
+                var $btn = $(this);
+                var $groupDiv = $btn.closest('.antidupl-merge-group');
+                $btn.prop('disabled', true).text(langs.interface.merging);
+                try {
+                    await mergeGroup(group, token, tgCode);
+                    $btn.text('✅ ' + langs.interface.merged);
+                    $groupDiv.fadeOut(300);
+                    notifyUser(langs.interface.merged + ' (ID: ' + group.master_id + ')', false);
+                } catch (err) {
+                    $btn.prop('disabled', false).text(langs.interface.merge_button);
+                    notifyUser(langs.interface.error + ': ' + (err.message || ''), true);
+                }
+            });
+        }
+
+        // ---------- Модальное окно настроек ----------
+        function showSettingsDialog() {
+            var settings = self.get_settings();
+            var html = '<div class="antidupl-modal-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:99998;"></div>' +
+                '<div class="antidupl-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 8px 32px rgba(0,0,0,0.2);z-index:99999;width:460px;padding:24px;">' +
+                '<h3 style="margin:0 0 16px;font-size:18px;">⚙️ ' + langs.interface.settings_title + '</h3>' +
+
+                '<div style="margin-bottom:14px;">' +
+                '<label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:#333;">' + langs.settings.api_token + '</label>' +
+                '<input class="antidupl-input-token" type="text" value="' + (settings.api_token || '') + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;">' +
+                '</div>' +
+
+                '<div style="margin-bottom:14px;">' +
+                '<label style="display:block;font-size:13px;font-weight:600;margin-bottom:4px;color:#333;">' + langs.settings.telegram_field_code + '</label>' +
+                '<input class="antidupl-input-tgfield" type="text" value="' + (settings.telegram_field_code || 'TELEGRAM_USERNAME_ID') + '" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;box-sizing:border-box;">' +
+                '</div>' +
+
+                '<div style="margin-bottom:20px;">' +
+                '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">' +
+                '<input class="antidupl-input-automerge" type="checkbox" ' + (settings.auto_merge ? 'checked' : '') + '> ' +
+                langs.settings.auto_merge +
+                '</label>' +
+                '</div>' +
+
+                '<div style="display:flex;justify-content:flex-end;gap:8px;">' +
+                '<button class="antidupl-settings-cancel" style="padding:8px 16px;cursor:pointer;border:1px solid #ddd;border-radius:4px;background:#fff;font-size:13px;">' + langs.interface.cancel_btn + '</button>' +
+                '<button class="antidupl-settings-save" style="padding:8px 16px;cursor:pointer;background:#1976d2;color:#fff;border:none;border-radius:4px;font-size:13px;">' + langs.interface.save_btn + '</button>' +
+                '</div>' +
+
+                '</div>';
+
+            $('body').append(html);
+
+            // Обработчики
+            $('.antidupl-settings-cancel, .antidupl-modal-overlay').on('click', function () {
+                $('.antidupl-modal, .antidupl-modal-overlay').remove();
+            });
+
+            $('.antidupl-settings-save').on('click', function () {
+                var newSettings = {
+                    api_token: $('.antidupl-input-token').val(),
+                    telegram_field_code: $('.antidupl-input-tgfield').val(),
+                    auto_merge: $('.antidupl-input-automerge').is(':checked')
+                };
+                self.set_settings(newSettings);
+                notifyUser(langs.interface.settings_saved, false);
+                $('.antidupl-modal, .antidupl-modal-overlay').remove();
+                // Обновляем UI в карточке
+                initCardUI();
+            });
         }
 
         // ---------- Callbacks ----------
